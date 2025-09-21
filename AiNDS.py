@@ -1,39 +1,57 @@
 import json
 import pyshark
 
-capture = pyshark.LiveCapture(interface='en0')
+def live_capture(interface):
+    print(f"Capturing on {interface}... Press CTRL+C to stop.")
 
-# Capture 10 packets
-capture.sniff(packet_count=10)
+    capture = pyshark.LiveCapture(
+        interface=interface,
+        tshark_path="/opt/homebrew/bin/tshark"  # Explicit path for macOS Homebrew
+    )
 
-# Extract and convert captured packets to JSON
-
-for index,packet in enumerate(capture):
-   #print(packet)
     try:
-        #Extract source address from IP or Ethernet layer if available
-        source = packet.ip.src if hasattr(packet, "ip") else (packet.eth.src if hasattr(packet, "eth") else "Unknown")
+        for index, packet in enumerate(capture.sniff_continuously()):
+            try:
+                ip_source = packet.ip.src if hasattr(packet, "ip") else "Unknown"
+                ip_destination = packet.ip.dst if hasattr(packet, "ip") else "Unknown"
+                mac_source = packet.eth.src if hasattr(packet, "eth") else "Unknown"
+                mac_destination = packet.eth.dst if hasattr(packet, "eth") else "Unknown"
 
-        packet_dict = {
-            "timestamp": packet.sniff_time.isoformat(),
-            "length": packet.length,
-            "layers": [layer.layer_name for layer in packet.layers],  # List of layer names
-            "Source": source,
-            "Destination": packet.ip.dst,
-       }
+                packet_dict = {
+                    "timestamp": packet.sniff_time.isoformat(),
+                    "length": packet.length,
+                    "layers": [layer.layer_name for layer in packet.layers],
+                    "IP Source": ip_source,
+                    "IP Destination": ip_destination,
+                    "MAC Source": mac_source,
+                    "MAC Destination": mac_destination,
+                }
 
-        #Convert dictionary to JSON string
-        JSONData = json.dumps(packet_dict, indent=4)
+                print(json.dumps(packet_dict, indent=4))
+                print("-" * 100)
 
-        #Convert JSON string back to dictionary to access keys
-        parsed_data = json.loads(JSONData)
+            except AttributeError as e:
+                print(f"Error processing packet: {e}")
 
-        #Print the extracted data
-        print("Packet: ",index+1 ," | Timestamp: ", parsed_data["timestamp"],"| Length: ",parsed_data["length"]," | Layers:", parsed_data["layers"]," | Source:",parsed_data["Source"]," | Destination: ",parsed_data["Destination"])
-        print("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+    except KeyboardInterrupt:
+        print("\nStopped live capture. Goodbye!")
 
-    except AttributeError as e:
-        print(f"Error processing packet: {e}")
+def read_file(pcap_path):
+    try:
+        cap = pyshark.FileCapture(
+            pcap_path,
+            tshark_path="/opt/homebrew/bin/tshark"
+        )
 
-#for packet in capture:
-  # print(packet)
+        packet = cap[0]  # read first packet
+        print(f"Packet Length: {packet.length}")
+        print(f"Available Layers: {[layer.layer_name for layer in packet.layers]}")
+        print(packet)
+
+    except Exception as e:
+        print(f"Error reading capture file: {e}")
+
+if __name__ == "__main__":
+    # Switch between live and file capture here
+    live_capture("en0")  
+    # read_file("/tmp/mycapture.cap")

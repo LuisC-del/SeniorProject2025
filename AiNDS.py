@@ -1,16 +1,51 @@
 import json
 import pyshark
+import csv
+import os
 
-def live_capture(interface):
+# Path for tshark (adjust if needed)
+TSHARK_PATH = "/opt/homebrew/bin/tshark"
+# Output dataset file
+DATASET_FILE = "packets_dataset.csv"
+
+def initialize_csv():
+    #Creates CSV file with headers if it doesn't exist."""
+    if not os.path.exists(DATASET_FILE):
+        with open(DATASET_FILE, mode='w', newline='') as f:
+            writer =csv.writer(f)
+            writer.writerow([
+                "timestamp", "ip_src", "ip_dst",
+                "mac_src", "mac_dst",
+                "protocols", "length"
+            ])
+
+def save_to_csv(packet_info):
+    with open(DATASET_FILE, mode='a', newline='') as f:
+        writer =csv.writer(f)
+        writer.writerow([
+            packet_info["timestamp"],
+            packet_info["IP Source"],
+            packet_info["IP Destination"],
+            packet_info["MAC Source"],
+            packet_info["MAC Destination"],
+            ",".join(packet_info["layers"]),
+            packet_info["length"]
+        ])
+
+
+def live_capture(interface,packet_limit=10):
     print(f"Capturing on {interface}... Press CTRL+C to stop.")
+    initialize_csv()
 
     capture = pyshark.LiveCapture(
         interface=interface,
-        tshark_path="/opt/homebrew/bin/tshark"  # Explicit path for macOS Homebrew
+        tshark_path=TSHARK_PATH  # Explicit path for macOS Homebrew
     )
 
     try:
         for index, packet in enumerate(capture.sniff_continuously()):
+            if index >= packet_limit:
+                break
             try:
                 ip_source = packet.ip.src if hasattr(packet, "ip") else "Unknown"
                 ip_destination = packet.ip.dst if hasattr(packet, "ip") else "Unknown"
@@ -26,7 +61,8 @@ def live_capture(interface):
                     "MAC Source": mac_source,
                     "MAC Destination": mac_destination,
                 }
-
+                save_to_csv(packet_dict)
+                print(f"[{index+1}] Packet captured and saved.")
                 print(json.dumps(packet_dict, indent=4))
                 print("-" * 100)
 
@@ -35,12 +71,15 @@ def live_capture(interface):
 
     except KeyboardInterrupt:
         print("\nStopped live capture. Goodbye!")
+    finally:
+        print(f"Data saved to {DATASET_FILE}")
 
 def read_file(pcap_path):
+
     try:
         cap = pyshark.FileCapture(
             pcap_path,
-            tshark_path="/opt/homebrew/bin/tshark"
+            tshark_path=TSHARK_PATH
         )
 
         packet = cap[0]  # read first packet
@@ -53,5 +92,5 @@ def read_file(pcap_path):
 
 if __name__ == "__main__":
     # Switch between live and file capture here
-    live_capture("en0")  
+    live_capture("en0",packet_limit=10)  
     # read_file("/tmp/mycapture.cap")

@@ -1,0 +1,11 @@
+# macOS junk
+.DS_Store
+
+# Local live captures (do NOT push)
+live_packets.csv
+
+# Locally generated transformer model (very large)
+packet_transformer_model/
+
+# Python virtual environments
+.venv/

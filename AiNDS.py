@@ -1,100 +1,152 @@
-import pyshark
-import pandas as pd
-from sklearn.preprocessing import LabelEncoder
+"python AiNDS.py to run"
+
 import time
+from pathlib import Path
 
-# Path to tshark
-TSHARK_PATH = "/opt/homebrew/bin/tshark"  # Adjust if needed
+import pandas as pd
+import pyshark
 
-# ------------------ LIVE CAPTURE + PREPROCESS ------------------ #
-def capture_and_preprocess(interface="en0", packet_limit=10, max_time=30):
+# Path to tshark (Homebrew default on Apple Silicon). Adjust if needed.
+TSHARK_PATH = "/opt/homebrew/bin/tshark"
+
+
+# ------------------ LIVE CAPTURE → LIGHT PREPROCESS ------------------ #
+# This file is now focused ONLY on capturing packets and doing
+# lightweight preprocessing / saving to CSV.
+# Heavy AI / transformer preprocessing will be done in a separate
+# script (e.g., transformer_model.py).
+
+
+def capture_packets(
+    interface: str = "en0",
+    packet_limit: int = 50,
+    max_time: int = 30,
+    out_csv: str | None = "live_packets.csv",
+    bpf_filter: str | None = None,
+) -> pd.DataFrame:
+    """Capture packets live and return a lightly processed DataFrame.
+
+    Parameters
+    ----------
+    interface : str
+        Network interface to capture from (e.g., "en0").
+    packet_limit : int
+        Maximum number of packets to capture.
+    max_time : int
+        Maximum time in seconds to wait for capture.
+    out_csv : str | None
+        If not None, save the captured packets to this CSV path.
+    bpf_filter : str | None
+        Optional BPF filter string to filter captured packets.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with raw fields suitable for both:
+        - classic models (after further encoding), and
+        - text-based transformer preprocessing in a separate script.
     """
-    Capture packets live and preprocess them into a DataFrame.
-    - interface: network interface to capture from
-    - packet_limit: max number of packets to capture
-    - max_time: maximum time (seconds) to wait for capture
-    """
-    print(f"=Starting capture on {interface} for up to {packet_limit} packets (max {max_time}s)...")
 
+    print(
+        f"\n[CAPTURE] Starting capture on {interface} for up to "
+        f"{packet_limit} packets (max {max_time}s)..."
+    )
+
+    # Set up live capture. only_summaries=True keeps it lighter.
     capture = pyshark.LiveCapture(
         interface=interface,
         tshark_path=TSHARK_PATH,
         only_summaries=True,
+        bpf_filter=bpf_filter,
     )
 
-    packets_data = []
     start_time = time.time()
 
-    try:
-        for index, packet in enumerate(capture.sniff_continuously(), start=1):
-            # Stop if reached packet limit
-            if index > packet_limit:
-                break
+    # Use sniff with timeout + packet_count so we don't block forever.
+    # This call returns after either max_time seconds OR packet_limit packets.
+    capture.sniff(timeout=max_time, packet_count=packet_limit)
 
-            # Stop if max time exceeded
-            if time.time() - start_time > max_time:
-                print("Max capture time reached.")
-                break
+    packets_data: list[dict] = []
 
-            try:
-                ip_src = getattr(packet.ip, "src", "0") if hasattr(packet, "ip") else "0"
-                ip_dst = getattr(packet.ip, "dst", "0") if hasattr(packet, "ip") else "0"
-                mac_src = getattr(packet.eth, "src", "0") if hasattr(packet, "eth") else "0"
-                mac_dst = getattr(packet.eth, "dst", "0") if hasattr(packet, "eth") else "0"
-                protocol = packet.highest_layer if hasattr(packet, "highest_layer") else "Unknown"
-                length = int(getattr(packet, "length", 0))
-                timestamp = getattr(packet, "sniff_time", "0")
+    for index, packet in enumerate(capture, start=1):
+        try:
+            ip_src = getattr(packet.ip, "src", "0") if hasattr(packet, "ip") else "0"
+            ip_dst = getattr(packet.ip, "dst", "0") if hasattr(packet, "ip") else "0"
+            mac_src = getattr(packet.eth, "src", "0") if hasattr(packet, "eth") else "0"
+            mac_dst = getattr(packet.eth, "dst", "0") if hasattr(packet, "eth") else "0"
+            protocol = (
+                packet.highest_layer if hasattr(packet, "highest_layer") else "Unknown"
+            )
 
-                packet_dict = {
+            # length and sniff_time are attributes on the summary packet.
+            length = int(getattr(packet, "length", 0) or 0)
+            timestamp = getattr(packet, "sniff_time", "0")
+
+            packets_data.append(
+                {
                     "Timestamp": timestamp,
                     "IP Source": ip_src,
                     "IP Destination": ip_dst,
                     "MAC Source": mac_src,
                     "MAC Destination": mac_dst,
                     "Protocol": protocol,
-                    "Length": length
+                    "Length": length,
                 }
+            )
 
-                packets_data.append(packet_dict)
+        except Exception as e:  # noqa: BLE001
+            print(f"[CAPTURE] Error reading packet {index}: {e}")
 
-            except Exception as e:
-                print(f"Error reading packet {index}: {e}")
+    capture.close()
 
-    except KeyboardInterrupt:
-        print("\nCapture stopped by user.")
-    finally:
-        capture.close()
-        print(f"Capture complete. {len(packets_data)} packets collected.")
+    elapsed = time.time() - start_time
+    print(
+        f"[CAPTURE] Done. Collected {len(packets_data)} packets in "
+        f"{elapsed:.2f}s."
+    )
 
-    # ------------------ PREPROCESSING ------------------ #
     if not packets_data:
-        print("No packets captured. Returning empty DataFrame.")
+        print("[CAPTURE] No packets captured. Returning empty DataFrame.")
         return pd.DataFrame()
 
     df = pd.DataFrame(packets_data)
 
-    # Convert numeric columns
+    # Ensure numeric type for Length; keep IP/MAC/Protocol as strings.
     df["Length"] = pd.to_numeric(df["Length"], errors="coerce").fillna(0).astype(int)
-    df.fillna({
-        "IP Source": "0",
-        "IP Destination": "0",
-        "MAC Source": "0",
-        "MAC Destination": "0",
-        "Protocol": "Unknown"
-    }, inplace=True)
 
-    # Encode categorical columns
-    for col in ["IP Source", "IP Destination", "MAC Source", "MAC Destination", "Protocol"]:
-        le = LabelEncoder()
-        df[col] = le.fit_transform(df[col])
+    # Fill missing string fields with simple placeholders.
+    df.fillna(
+        {
+            "IP Source": "0",
+            "IP Destination": "0",
+            "MAC Source": "0",
+            "MAC Destination": "0",
+            "Protocol": "Unknown",
+        },
+        inplace=True,
+    )
 
-    # Add label placeholder
-    df["Label"] = 0  # Benign = 0, Malicious = 1
+    # Add a label column as a placeholder.
+    # For live traffic, everything is assumed benign (0) by default.
+    # When you build labeled datasets from NSL-KDD / CICIDS2017,
+    # you will overwrite this column with real labels.
+    df["Label"] = 0
 
-    print("Preprocessing complete.")
+    # Optionally save to CSV for offline model training / transformer prep.
+    if out_csv is not None:
+        out_path = Path(out_csv)
+        df.to_csv(out_path, index=False)
+        print(f"[CAPTURE] Saved {len(df)} packets to {out_path.resolve()}")
+
+    print("[CAPTURE] Preprocessing complete.")
     return df
 
-# ------------------ MAIN ------------------ #
+
 if __name__ == "__main__":
-    df = capture_and_preprocess(interface="en0", packet_limit=10, max_time=30)
-    
+    # Example: capture ICMP (ping) packets to test live capture
+    capture_packets(
+        interface="en0",
+        packet_limit=20,
+        max_time=30,
+        bpf_filter="icmp",
+    )

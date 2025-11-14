@@ -1,96 +1,100 @@
-import json
 import pyshark
-import csv
-import os
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+import time
 
-# Path for tshark (adjust if needed)
-TSHARK_PATH = "/opt/homebrew/bin/tshark"
-# Output dataset file
-DATASET_FILE = "packets_dataset.csv"
+# Path to tshark
+TSHARK_PATH = "/opt/homebrew/bin/tshark"  # Adjust if needed
 
-def initialize_csv():
-    #Creates CSV file with headers if it doesn't exist."""
-    if not os.path.exists(DATASET_FILE):
-        with open(DATASET_FILE, mode='w', newline='') as f:
-            writer =csv.writer(f)
-            writer.writerow([
-                "timestamp", "ip_src", "ip_dst",
-                "mac_src", "mac_dst",
-                "protocols", "length"
-            ])
-
-def save_to_csv(packet_info):
-    with open(DATASET_FILE, mode='a', newline='') as f:
-        writer =csv.writer(f)
-        writer.writerow([
-            packet_info["timestamp"],
-            packet_info["IP Source"],
-            packet_info["IP Destination"],
-            packet_info["MAC Source"],
-            packet_info["MAC Destination"],
-            ",".join(packet_info["layers"]),
-            packet_info["length"]
-        ])
-
-
-def live_capture(interface,packet_limit=10):
-    print(f"Capturing on {interface}... Press CTRL+C to stop.")
-    initialize_csv()
+# ------------------ LIVE CAPTURE + PREPROCESS ------------------ #
+def capture_and_preprocess(interface="en0", packet_limit=10, max_time=30):
+    """
+    Capture packets live and preprocess them into a DataFrame.
+    - interface: network interface to capture from
+    - packet_limit: max number of packets to capture
+    - max_time: maximum time (seconds) to wait for capture
+    """
+    print(f"=Starting capture on {interface} for up to {packet_limit} packets (max {max_time}s)...")
 
     capture = pyshark.LiveCapture(
         interface=interface,
-        tshark_path=TSHARK_PATH  # Explicit path for macOS Homebrew
+        tshark_path=TSHARK_PATH,
+        only_summaries=True,
     )
 
+    packets_data = []
+    start_time = time.time()
+
     try:
-        for index, packet in enumerate(capture.sniff_continuously()):
-            if index >= packet_limit:
+        for index, packet in enumerate(capture.sniff_continuously(), start=1):
+            # Stop if reached packet limit
+            if index > packet_limit:
                 break
+
+            # Stop if max time exceeded
+            if time.time() - start_time > max_time:
+                print("Max capture time reached.")
+                break
+
             try:
-                ip_source = packet.ip.src if hasattr(packet, "ip") else "Unknown"
-                ip_destination = packet.ip.dst if hasattr(packet, "ip") else "Unknown"
-                mac_source = packet.eth.src if hasattr(packet, "eth") else "Unknown"
-                mac_destination = packet.eth.dst if hasattr(packet, "eth") else "Unknown"
+                ip_src = getattr(packet.ip, "src", "0") if hasattr(packet, "ip") else "0"
+                ip_dst = getattr(packet.ip, "dst", "0") if hasattr(packet, "ip") else "0"
+                mac_src = getattr(packet.eth, "src", "0") if hasattr(packet, "eth") else "0"
+                mac_dst = getattr(packet.eth, "dst", "0") if hasattr(packet, "eth") else "0"
+                protocol = packet.highest_layer if hasattr(packet, "highest_layer") else "Unknown"
+                length = int(getattr(packet, "length", 0))
+                timestamp = getattr(packet, "sniff_time", "0")
 
                 packet_dict = {
-                    "timestamp": packet.sniff_time.isoformat(),
-                    "length": packet.length,
-                    "layers": [layer.layer_name for layer in packet.layers],
-                    "IP Source": ip_source,
-                    "IP Destination": ip_destination,
-                    "MAC Source": mac_source,
-                    "MAC Destination": mac_destination,
+                    "Timestamp": timestamp,
+                    "IP Source": ip_src,
+                    "IP Destination": ip_dst,
+                    "MAC Source": mac_src,
+                    "MAC Destination": mac_dst,
+                    "Protocol": protocol,
+                    "Length": length
                 }
-                save_to_csv(packet_dict)
-                print(f"[{index+1}] Packet captured and saved.")
-                print(json.dumps(packet_dict, indent=4))
-                print("-" * 100)
 
-            except AttributeError as e:
-                print(f"Error processing packet: {e}")
+                packets_data.append(packet_dict)
+
+            except Exception as e:
+                print(f"Error reading packet {index}: {e}")
 
     except KeyboardInterrupt:
-        print("\nStopped live capture. Goodbye!")
+        print("\nCapture stopped by user.")
     finally:
-        print(f"Data saved to {DATASET_FILE}")
+        capture.close()
+        print(f"Capture complete. {len(packets_data)} packets collected.")
 
-def read_file(pcap_path):
+    # ------------------ PREPROCESSING ------------------ #
+    if not packets_data:
+        print("No packets captured. Returning empty DataFrame.")
+        return pd.DataFrame()
 
-    try:
-        cap = pyshark.FileCapture(
-            pcap_path,
-            tshark_path=TSHARK_PATH
-        )
+    df = pd.DataFrame(packets_data)
 
-        packet = cap[0]  # read first packet
-        print(f"Packet Length: {packet.length}")
-        print(f"Available Layers: {[layer.layer_name for layer in packet.layers]}")
-        print(packet)
+    # Convert numeric columns
+    df["Length"] = pd.to_numeric(df["Length"], errors="coerce").fillna(0).astype(int)
+    df.fillna({
+        "IP Source": "0",
+        "IP Destination": "0",
+        "MAC Source": "0",
+        "MAC Destination": "0",
+        "Protocol": "Unknown"
+    }, inplace=True)
 
-    except Exception as e:
-        print(f"Error reading capture file: {e}")
+    # Encode categorical columns
+    for col in ["IP Source", "IP Destination", "MAC Source", "MAC Destination", "Protocol"]:
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col])
 
+    # Add label placeholder
+    df["Label"] = 0  # Benign = 0, Malicious = 1
+
+    print("Preprocessing complete.")
+    return df
+
+# ------------------ MAIN ------------------ #
 if __name__ == "__main__":
-    # Switch between live and file capture here
-    live_capture("en0",packet_limit=10)  
-    # read_file("/tmp/mycapture.cap")
+    df = capture_and_preprocess(interface="en0", packet_limit=10, max_time=30)
+    
